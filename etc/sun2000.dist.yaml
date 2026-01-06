@@ -1,0 +1,36 @@
+#YAML configuration for sun2000 inverter data reader
+
+influx:
+  #InfluxDB database version [1,2,3]
+  influx_db_version: 2
+  
+  #Credentials for InfluxDBv1:
+  influx_v1_host: <your.host.example.com>
+  influx_v1_db: <your database name>
+  influx_v1_username: <your username>
+  influx_v1_password: <your password>
+
+  #Credentials for InfluxDBv2:
+  influx_v2_url: <your.host.example.com>
+  influx_v2_bucket: <your bucket name>
+  influx_v2_org: <your organization name>
+  influx_v2_token: <your influxdb access token>
+
+inverter:
+  sun2000_host: <your.inverter.host.example.com>
+  sun2000_port: 502       # your port, default: 502
+  sun2000_slave_id: 4     # the modbus slave id of the inverter, e.g. 4
+  sun2000_timeout: 10     # the modbus timeout in seconds, e.g. 10
+  sun2000_registers:
+    - "active_power"
+    - "daily_yield_energy"
+    - "accumulated_yield_energy"
+    - "internal_temperature"
+    - "grid_voltage"
+    - "pv_01_voltage"
+    - "pv_01_current"
+    - "pv_02_voltage"
+    - "pv_02_current"
+
+general:
+  read_interval: 60     # read interval in seconds, e.g. 10
