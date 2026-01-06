@@ -22,4 +22,4 @@ set -a
 source /opt/sun2000/environment.env
 set +a
 
-python /opt/sun2000/read_data.py
+python /opt/sun2000/read_data.py -c "/opt/sun2000/etc/sun2000.yaml"
