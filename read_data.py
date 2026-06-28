@@ -27,6 +27,7 @@ from huawei_solar import (
     create_device_instance,
     create_tcp_client,
 )
+from huawei_solar import RegisterName
 #from huawei_solar import register_names as reg
 # Lib for InfluxDB v1
 from influxdb import InfluxDBClient as InfluxDBClient_v1
@@ -108,19 +109,20 @@ async def get_solar_data(registers):
                 try:
                     data = []
                     results = await device.batch_update(registers)
+                    serial_entry = results.get(RegisterName("serial_number"))
+                    inverter_serial_number = serial_entry.value if serial_entry else "UNKNOWN"
 
                     for register, result in results.items():
-                        ms = {}
-                        # Use time.time_ns() if strftime('%s') causes issues on your OS
-                        ms["time"] = int(datetime.datetime.now().strftime('%s')) * 10**9
-                        ms["measurement"] = register
-                        ms["fields"] = {"value": result.value}
-                        ms["tags"] = {"unit": result.unit}
-                        
                         sys.stdout.write(f'Read register "{register}": {result.value} {result.unit}\n')
-                        
-                        if result.value > 0:
-                            data.append(ms)
+                        if register != 'serial_number':
+                            ms = {}
+                            # Use time.time_ns() if strftime('%s') causes issues on your OS
+                            ms["time"] = int(datetime.datetime.now().strftime('%s')) * 10**9
+                            ms["measurement"] = register
+                            ms["fields"] = {"value": result.value}
+                            ms["tags"] = {"unit": result.unit, "serialnumber": inverter_serial_number}
+                            if result.value > 0:
+                                data.append(ms)
 
                     # InfluxDB write process
                     if INFLUX_DB_VERSION == 1:

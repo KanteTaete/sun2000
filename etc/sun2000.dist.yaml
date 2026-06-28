@@ -31,6 +31,7 @@ inverter:
     - "pv_01_current"
     - "pv_02_voltage"
     - "pv_02_current"
+    - "serial_number"
 
 general:
   read_interval: 60     # read interval in seconds, e.g. 10
