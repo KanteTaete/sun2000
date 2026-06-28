@@ -25,7 +25,11 @@ import yaml                     #to read configuration from yaml file
 import argparse                 #argument parser to parse command line arguments
 
 #imports from 3rd party libraries
-from huawei_solar import AsyncHuaweiSolar
+from huawei_solar import (
+    create_device_instance,
+    create_tcp_client,
+)
+#from huawei_solar import register_names as reg
 # Lib for InfluxDB v1
 from influxdb import InfluxDBClient as InfluxDBClient_v1
 # Lib for InfluxDB v2
@@ -135,25 +139,32 @@ async def get_solar_data(registers):
     Args:
         registers (huawei_solar.register_names): modbus registers to read
     """
-    conn = await AsyncHuaweiSolar.create(host=SUN2000_HOST, port=SUN2000_PORT, slave_id=SUN2000_SLAVE_ID, timeout=SUN2000_TIMEOUT)
-    sys.stdout.write(f'Connected to Huawei SUN2000 inverter, host: {SUN2000_HOST}:{SUN2000_PORT} (slave ID: {SUN2000_SLAVE_ID})\n')
-    
+    try:
+        client = create_tcp_client(host=SUN2000_HOST, port=SUN2000_PORT, unit_id=SUN2000_SLAVE_ID, timeout=SUN2000_TIMEOUT) #, wait_after_connect=2.0)
+        device = await create_device_instance(client)
+
+        sys.stdout.write(f'Connected to Huawei SUN2000 inverter, host: {SUN2000_HOST}:{SUN2000_PORT} (unit ID: {SUN2000_SLAVE_ID})\n')
+    except Exception as e:
+        sys.stderr.write(f'Error: Could not connect to Huawei SUN2000 inverter, host: {SUN2000_HOST}:{SUN2000_PORT} (unit ID: {SUN2000_SLAVE_ID}). Exception: {e}\n')
+        exit(1)
+
     # sleep 2 seconds to ensure connection is established
-    time.sleep(2)
+    #time.sleep(2)
 
     try:
         while True:
             data = []
 
-            for r in registers:
+            results = await device.batch_update(registers)#.values())
+
+            for register, result in results.items():
                 ms = {}
                 ms["time"] = int(datetime.datetime.now().strftime('%s')) * 10**9
-                result = await conn.get(name=r,slave_id=SUN2000_SLAVE_ID)
 
-                ms["measurement"] = r
+                ms["measurement"] = register
                 ms["fields"] = {"value": result.value}
                 ms["tags"] = {"unit": result.unit}
-                sys.stdout.write(f'Read register "{r}": {result.value} {result.unit}\n')
+                sys.stdout.write(f'Read register "{register}": {result.value} {result.unit}\n')
                 if result.value > 0:
                     data.append(ms)
 
@@ -172,7 +183,7 @@ async def get_solar_data(registers):
         sys.stderr.write(f'Error: Exception occurred: {e}\n')
     finally:
         # close connection to inverter
-        await conn.stop()
+        await device.stop()
         sys.stdout.write('Connection to Huawei SUN2000 inverter closed.\n')
 
 asyncio.run(get_solar_data(SUN2000_REGISTERS))
@@ -183,3 +194,5 @@ if INFLUX_DB_VERSION == 1:
     atexit.register(on_exit, dbclient_v1, None)
 elif INFLUX_DB_VERSION == 2:
     atexit.register(on_exit, dbclient_v2, write_api)
+else:
+    raise ValueError(f"Unsupported INFLUX_DB_VERSION: {INFLUX_DB_VERSION}")
