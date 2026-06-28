@@ -1,0 +1,19 @@
+{
+    "configurations": [
+
+        {
+            "name": "Python Debugger: Python File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}"
+        },
+        {
+            "name": "read_data.py mit etc/sun2000.yaml",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/read_data.py",
+            "args": ["-c", "${workspaceFolder}/etc/sun2000.yaml"],
+            "console": "integratedTerminal"
+        }
+    ]
+}
