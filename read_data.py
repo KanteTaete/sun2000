@@ -17,10 +17,8 @@
 # imports from standard libraries
 import asyncio
 import datetime
-import time
 import os
 import sys
-import atexit                   #to call functions on exit of script
 import yaml                     #to read configuration from yaml file
 import argparse                 #argument parser to parse command line arguments
 
@@ -76,16 +74,89 @@ def read_secret(variable_name):
         secret = str(os.environ.get(variable_name, None))
     return secret
 
-def on_exit(db_client, write_api):
-    """on_exit Close clients after terminate a script.
 
-    :param db_client: InfluxDB client
-    :param write_api: WriteApi  - only for InfluxDB v2
-    :return: nothing
+async def get_solar_data(registers):
+    """get_solar_data connect to inverter, read registers and write data to influxdb
+
+    Args:
+        registers (huawei_solar.register_names): modbus registers to read
     """
-    if write_api is not None:
-        write_api.close()
-    db_client.close()
+
+    device = None
+    client = None
+
+    sys.stdout.write("Starting solar data collection loop...\n")
+    try:
+        while True:
+            # 1. Establish connection if it does not exist (or was lost)
+            if device is None:
+                try:
+                    client = create_tcp_client(
+                        host=SUN2000_HOST, 
+                        port=SUN2000_PORT, 
+                        unit_id=SUN2000_SLAVE_ID, 
+                        timeout=SUN2000_TIMEOUT
+                    )
+                    device = await create_device_instance(client)
+                    sys.stdout.write(f'Connected to Huawei SUN2000 inverter, host: {SUN2000_HOST}:{SUN2000_PORT} (unit ID: {SUN2000_SLAVE_ID})\n')
+                except Exception as conn_err:
+                    sys.stderr.write(f'Connection to Huawei SUN2000 inverter, host: {SUN2000_HOST}:{SUN2000_PORT} (unit ID: {SUN2000_SLAVE_ID}) failed: {conn_err}. Retrying in next cycle...\n')
+                    device = None  # Reset connection state
+
+            # 2. Fetch and write data (only if connected)
+            if device is not None:
+                try:
+                    data = []
+                    results = await device.batch_update(registers)
+
+                    for register, result in results.items():
+                        ms = {}
+                        # Use time.time_ns() if strftime('%s') causes issues on your OS
+                        ms["time"] = int(datetime.datetime.now().strftime('%s')) * 10**9
+                        ms["measurement"] = register
+                        ms["fields"] = {"value": result.value}
+                        ms["tags"] = {"unit": result.unit}
+                        
+                        sys.stdout.write(f'Read register "{register}": {result.value} {result.unit}\n')
+                        
+                        if result.value > 0:
+                            data.append(ms)
+
+                    # InfluxDB write process
+                    if INFLUX_DB_VERSION == 1:
+                        dbclient_v1.write_points(data)
+                    elif INFLUX_DB_VERSION == 2:
+                        write_api.write(bucket=INFLUX_V2_BUCKET, org=INFLUX_V2_ORG, record=data)
+
+                except Exception as cycle_err:
+                    # Catches Modbus timeouts or InfluxDB network errors
+                    sys.stderr.write(f'Error during read/write cycle: {cycle_err}\n')
+                    
+                    # Proactively reset the connection for the next cycle
+                    try:
+                        await device.stop()
+                    except Exception:
+                        pass
+                    device = None
+
+            # 3. Wait before the next execution cycle
+            sys.stdout.write(f'Going to sleep for {READ_INTERVAL} seconds.\n')
+            if READ_INTERVAL == 0:
+                break  # One-shot execution (e.g. triggered by Cronjob or Systemd timer)
+            else:
+                await asyncio.sleep(READ_INTERVAL)
+
+    except KeyboardInterrupt:
+        sys.stdout.write('Terminating program on user request (KeyboardInterrupt).\n')
+    finally:
+        # Final cleanup on script termination
+        if device is not None:
+            try:
+                await device.stop()
+                sys.stdout.write('Connection to Huawei SUN2000 inverter closed.\n')
+            except Exception as e:
+                sys.stderr.write(f'Warning: Error closing device connection: {e}\n')
+
 
 #***************** function definition end *****************#
 
@@ -119,80 +190,47 @@ READ_INTERVAL = config['general']['read_interval']
 
 #***************** configuration variables definition end *****************#
 
+# ***************** MAIN PROGRAM EXECUTION ***************** #
+if __name__ == "__main__":
 
-if INFLUX_DB_VERSION == 1:
-    if INFLUX_V1_PASSWORD is None:
-        INFLUX_V1_PASSWORD = read_secret('INFLUX_V1_PASSWORD')
-    dbclient_v1 = InfluxDBClient_v1(INFLUX_V1_HOST, database=INFLUX_V1_DB,
-                          username=INFLUX_V1_USERNAME, password=INFLUX_V1_PASSWORD)
-elif INFLUX_DB_VERSION == 2:
-    dbclient_v2 = InfluxDBClient_v2(url=INFLUX_V2_URL, token=INFLUX_V2_TOKEN,org=INFLUX_V2_ORG)
-    write_api=dbclient_v2.write_api(write_options=SYNCHRONOUS)
-else:
-    sys.stderr.write('Error: No InfluxDB version given in environement variable "INFLUX_DB_VERSION" (file "environment.env").')
-    exit(1)
+    if INFLUX_DB_VERSION == 1:
+        if INFLUX_V1_PASSWORD is None:
+            INFLUX_V1_PASSWORD = read_secret('INFLUX_V1_PASSWORD')
+        dbclient_v1 = InfluxDBClient_v1(
+            INFLUX_V1_HOST,
+            database=INFLUX_V1_DB,
+            username=INFLUX_V1_USERNAME,
+            password=INFLUX_V1_PASSWORD
+            )
+        try:
+            asyncio.run(get_solar_data(SUN2000_REGISTERS))
+        finally:
+            if dbclient_v1 is not None:
+                try:
+                    dbclient_v1.close()
+                    sys.stdout.write('InfluxDB client closed.\n')
+                except Exception as e:
+                    sys.stderr.write(f'Warning: Error closing DB client: {e}\n')
 
+    elif INFLUX_DB_VERSION == 2:
+        # Hier mit dem Context-Manager 'with' arbeiten
+        with InfluxDBClient_v2(
+            url=INFLUX_V2_URL,
+            token=INFLUX_V2_TOKEN,
+            org=INFLUX_V2_ORG
+            ) as dbclient_v2:
+            write_api = dbclient_v2.write_api(write_options=SYNCHRONOUS)
 
-async def get_solar_data(registers):
-    """get_solar_data connect to inverter, read registers and write data to influxdb
+            try:
+                asyncio.run(get_solar_data(SUN2000_REGISTERS))
+            finally:
+                if write_api is not None:
+                    try:
+                        write_api.close()
+                        sys.stdout.write('WriteApi closed.\n')
+                    except Exception as e:
+                        sys.stderr.write(f'Warning: Error closing WriteApi: {e}\n')
 
-    Args:
-        registers (huawei_solar.register_names): modbus registers to read
-    """
-    try:
-        client = create_tcp_client(host=SUN2000_HOST, port=SUN2000_PORT, unit_id=SUN2000_SLAVE_ID, timeout=SUN2000_TIMEOUT) #, wait_after_connect=2.0)
-        device = await create_device_instance(client)
-
-        sys.stdout.write(f'Connected to Huawei SUN2000 inverter, host: {SUN2000_HOST}:{SUN2000_PORT} (unit ID: {SUN2000_SLAVE_ID})\n')
-    except Exception as e:
-        sys.stderr.write(f'Error: Could not connect to Huawei SUN2000 inverter, host: {SUN2000_HOST}:{SUN2000_PORT} (unit ID: {SUN2000_SLAVE_ID}). Exception: {e}\n')
+    else:
+        sys.stderr.write('Error: No valid InfluxDB version given in configuration.\n')
         exit(1)
-
-    # sleep 2 seconds to ensure connection is established
-    #time.sleep(2)
-
-    try:
-        while True:
-            data = []
-
-            results = await device.batch_update(registers)#.values())
-
-            for register, result in results.items():
-                ms = {}
-                ms["time"] = int(datetime.datetime.now().strftime('%s')) * 10**9
-
-                ms["measurement"] = register
-                ms["fields"] = {"value": result.value}
-                ms["tags"] = {"unit": result.unit}
-                sys.stdout.write(f'Read register "{register}": {result.value} {result.unit}\n')
-                if result.value > 0:
-                    data.append(ms)
-
-            if INFLUX_DB_VERSION == 1:
-                dbclient_v1.write_points(data)
-            elif INFLUX_DB_VERSION == 2:
-                write_api.write(bucket=INFLUX_V2_BUCKET, org=INFLUX_V2_ORG, record=data)
-
-            sys.stdout.write(f'Going to sleep for {READ_INTERVAL} seconds.\n')
-            time.sleep(READ_INTERVAL)
-    except KeyboardInterrupt:
-        sys.stdout.write('Terminating program on user request (KeyboardInterrupt).\n')
-    except Exception as e:
-        # likely catches all exceptions within while loop --> add extra try/except where reading registers and
-        # where writing to influxdb; implementation pending
-        sys.stderr.write(f'Error: Exception occurred: {e}\n')
-    finally:
-        # close connection to inverter
-        await device.stop()
-        sys.stdout.write('Connection to Huawei SUN2000 inverter closed.\n')
-
-asyncio.run(get_solar_data(SUN2000_REGISTERS))
-
-
-# call after terminate a script
-if INFLUX_DB_VERSION == 1:
-    atexit.register(on_exit, dbclient_v1, None)
-elif INFLUX_DB_VERSION == 2:
-    atexit.register(on_exit, dbclient_v2, write_api)
-else:
-    raise ValueError(f"Unsupported INFLUX_DB_VERSION: {INFLUX_DB_VERSION}")
